@@ -37,6 +37,10 @@ public:
 	UPROPERTY(VisibleAnywhere)
 	USceneCaptureComponent2D* BackwardCapture;
 
+	// Docking port reference
+	UPROPERTY(EditAnywhere, Category="Docking")
+	AActor* DockingPort;
+
 protected:
 	// Called when the game starts or when spawned
 	virtual void BeginPlay() override;

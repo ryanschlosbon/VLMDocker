@@ -65,82 +65,111 @@ AChaserPawn::AChaserPawn()
 
 void AChaserPawn::CaptureAndSendAll()
 {
-	struct Cam { USceneCaptureComponent2D* Comp; FString Id; };
-	TArray<Cam> cams = {
-		{ForwardCapture, "forward"}, {LeftCapture, "left"}, /*…*/ 
-	  };
-	for (auto& cam : cams)
-	{
-		if (!cam.Comp->TextureTarget) continue;
-		cam.Comp->CaptureScene();
-	}
-	// 1) Read pixels from RenderTarget
-	if (!ForwardCapture->TextureTarget) return;
-	UTextureRenderTarget2D* RT = ForwardCapture->TextureTarget;
+    struct Cam { USceneCaptureComponent2D* Comp; FString Id; };
+    TArray<Cam> cams = {
+        {ForwardCapture,   TEXT("forward")},
+        {LeftCapture,      TEXT("left")},
+        {RightCapture,     TEXT("right")},
+        {UpCapture,        TEXT("up")},
+        {DownCapture,      TEXT("down")},
+        {BackwardCapture,  TEXT("backward")}
+    };
 
-	FRenderTarget* RenderTargetResource = RT->GameThread_GetRenderTargetResource();
-	TArray<FColor> RawPixels;
-	RenderTargetResource->ReadPixels(RawPixels);
+    for (auto& cam : cams)
+    {
+        // 1) Ensure we have a render target
+        if (!cam.Comp || !cam.Comp->TextureTarget) 
+            continue;
 
-	// 2) Compress to PNG
-	TArray<uint8> PngData;
-	FImageUtils::CompressImageArray(
-		RT->SizeX, RT->SizeY, RawPixels, PngData
-	);
+        // 2) Trigger the capture
+        cam.Comp->CaptureScene();
 
-	// 3) Base64 encode
-	FString B64 = FBase64::Encode(PngData);
+        // 3) Read pixels from *this* camera’s render target
+        UTextureRenderTarget2D* RT = cam.Comp->TextureTarget;
+        FRenderTarget* RTResource = RT->GameThread_GetRenderTargetResource();
 
-	// 4) Build JSON payload
-	TSharedPtr<FJsonObject> JsonObj = MakeShareable(new FJsonObject());
-	JsonObj->SetStringField("camera_id", "forward");
-	JsonObj->SetStringField("image_base64", B64);
-	JsonObj->SetStringField("command", CurrentCommand); // e.g., set elsewhere
+        TArray<FColor> RawPixels;
+        RTResource->ReadPixels(RawPixels);
 
-	FString OutputString;
-	TSharedRef<TJsonWriter<>> Writer = TJsonWriterFactory<>::Create(&OutputString);
-	FJsonSerializer::Serialize(JsonObj.ToSharedRef(), Writer);
+        // 4) Compress to PNG
+        TArray<uint8> PngData;
+        FImageUtils::CompressImageArray(RT->SizeX, RT->SizeY, RawPixels, PngData);
 
-	// 5) HTTP POST
-	TSharedRef<IHttpRequest> Request = FHttpModule::Get().CreateRequest();
-	Request->SetURL("http://127.0.0.1:5001/infer");
-	Request->SetVerb("POST");
-	Request->SetHeader("Content-Type", "application/json");
-	Request->SetContentAsString(OutputString);
-	Request->OnProcessRequestComplete().BindUObject(
-		this, &AChaserPawn::OnInferenceResponse
-	);
-	Request->ProcessRequest();
+        // 5) Base64‐encode
+        FString B64 = FBase64::Encode(PngData);
+
+        // 6) Build JSON payload
+        TSharedPtr<FJsonObject> JsonObj = MakeShareable(new FJsonObject());
+        JsonObj->SetStringField(TEXT("camera_id"), cam.Id);
+        JsonObj->SetStringField(TEXT("image_base64"), B64);
+        JsonObj->SetStringField(TEXT("command"), CurrentCommand);
+
+        FString OutputString;
+        TSharedRef<TJsonWriter<>> Writer = TJsonWriterFactory<>::Create(&OutputString);
+        FJsonSerializer::Serialize(JsonObj.ToSharedRef(), Writer);
+
+        // 7) Send HTTP POST
+        TSharedRef<IHttpRequest> Request = FHttpModule::Get().CreateRequest();
+        Request->SetURL("http://127.0.0.1:5001/infer");
+        Request->SetVerb("POST");
+        Request->SetHeader("Content-Type", "application/json");
+        Request->SetContentAsString(OutputString);
+        Request->OnProcessRequestComplete().BindUObject(
+            this, &AChaserPawn::OnInferenceResponse
+        );
+        Request->ProcessRequest();
+    }
 }
 
 void AChaserPawn::OnInferenceResponse(
-	FHttpRequestPtr Request, FHttpResponsePtr Response, bool bWasSuccessful
+    FHttpRequestPtr Request, FHttpResponsePtr Response, bool bWasSuccessful
 ) {
-	if (!bWasSuccessful || !Response.IsValid()) {
-		UE_LOG(LogTemp, Warning, TEXT("Inference request failed"));
-		return;
-	}
-	// Parse JSON
-	TSharedPtr<FJsonObject> JsonResponse;
-	TSharedRef<TJsonReader<>> Reader = TJsonReaderFactory<>::Create(
-		Response->GetContentAsString()
-	);
-	if (!FJsonSerializer::Deserialize(Reader, JsonResponse)) {
-		UE_LOG(LogTemp, Warning, TEXT("Failed to parse inference JSON"));
-		return;
-	}
-	FString Action = JsonResponse->GetStringField("action");
-	float Confidence = JsonResponse->GetNumberField("confidence");
-	UE_LOG(LogTemp, Log, TEXT("Action: %s (%.2f)"), *Action, Confidence);
+    if (!bWasSuccessful || !Response.IsValid()) return;
+    TSharedPtr<FJsonObject> Json;
+    TSharedRef<TJsonReader<>> Reader = TJsonReaderFactory<>::Create(Response->GetContentAsString());
+    if (!FJsonSerializer::Deserialize(Reader, Json)) return;
 
-	GetWorld()->GetTimerManager().SetTimer(
-		CaptureTimerHandle,
-		this, &AChaserPawn::CaptureAndSendAll,
-		1.0f,
-		false  // one-shot
-	);
-	// TODO: map Action → actual movement calls (AddMovementInput or SetActorRotation, etc.)
+    FString Action = Json->GetStringField("action");
+    float Confidence = Json->GetNumberField("confidence");
+
+    // Movement magnitude (tweak as needed)
+    const float TransAmt = 100.0f;    // Unreal units per call
+    const float RotAmt   = 10.0f;     // degrees per call
+
+    if (Action == "forward") {
+        AddMovementInput(GetActorForwardVector(), TransAmt);
+    } else if (Action == "backward") {
+        AddMovementInput(-GetActorForwardVector(), TransAmt);
+    } else if (Action == "right") {
+        AddMovementInput(GetActorRightVector(), TransAmt);
+    } else if (Action == "left") {
+        AddMovementInput(-GetActorRightVector(), TransAmt);
+    } else if (Action == "up") {
+        AddMovementInput(GetActorUpVector(), TransAmt);
+    } else if (Action == "down") {
+        AddMovementInput(-GetActorUpVector(), TransAmt);
+    } else if (Action == "rotate_cw") {
+        AddControllerYawInput(RotAmt);
+    } else if (Action == "rotate_ccw") {
+        AddControllerYawInput(-RotAmt);
+    } else if (Action == "pitch_up") {
+        AddControllerPitchInput(RotAmt);
+    } else if (Action == "pitch_down") {
+        AddControllerPitchInput(-RotAmt);
+    } else if (Action == "align") {
+        if (DockingPort) {
+            FVector Dir = (DockingPort->GetActorLocation() - GetActorLocation()).GetSafeNormal();
+            FRotator TargetRot = Dir.Rotation();
+            // Smooth interpolation
+            SetActorRotation(FMath::RInterpTo(GetActorRotation(), TargetRot, GetWorld()->GetDeltaSeconds(), 1.0f));
+        }
+    } else if (Action == "hold") {
+        // no-op or zero velocity
+    }
+
+    UE_LOG(LogTemp, Log, TEXT("[%s] -> %s (%.2f)"), *CurrentCommand, *Action, Confidence);
 }
+
 
 
 // Called when the game starts or when spawned

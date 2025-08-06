@@ -1,0 +1,5 @@
+flask
+torch
+torchvision
+pillow
+git+https://github.com/openai/CLIP.git

@@ -12,11 +12,11 @@ app = Flask(__name__)
 # Where to store dataset images & labels
 DATASET_DIR = "vlm_dataset"
 os.makedirs(DATASET_DIR, exist_ok=True)
-LABELS_PATH = os.path.join(DATASET_DIR, "labels.csv")
+LABELS_CSV = os.path.join(DATASET_DIR, "labels.csv")
 # If labels.csv doesn’t exist yet, write header
-if not os.path.exists(LABELS_PATH):
-    with open(LABELS_PATH, "w") as f:
-        f.write("filename,command\n")
+if not os.path.exists(LABELS_CSV):
+    with open(LABELS_CSV, "w") as f:
+        f.write("camera_id,filename,command\n")
 
 # Device
 device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -59,28 +59,34 @@ def infer_action(image: Image.Image, command: str):
 
 @app.route("/infer", methods=["POST"])
 def infer_endpoint():
-    data = request.json or {}
-    img_b64 = data.get("image_base64")
-    cmd     = data.get("command", "")
+    data   = request.json or {}
+    img_b64= data.get("image_base64")
+    cmd    = data.get("command", "")
+    cam_id = data.get("camera_id", "unknown")
+
     if not img_b64:
         return jsonify({"error": "Missing image_base64"}), 400
 
-    # Decode image
+    # decode image
     try:
         raw = base64.b64decode(img_b64)
         img = Image.open(BytesIO(raw)).convert("RGB")
     except Exception as e:
-        return jsonify({"error": f"Image decode error: {e}"}), 400
+        return jsonify({"error": f"Decode error: {e}"}), 400
 
-    # 1) Save to dataset
-    ts       = datetime.utcnow().strftime("%Y%m%dT%H%M%S%f")
-    fname    = f"{ts}.png"
-    path     = os.path.join(DATASET_DIR, fname)
-    img.save(path, format="PNG")
-    with open(LABELS_PATH, "a") as f:
-        f.write(f"{fname},{cmd}\n")
+    # save under camera-specific folder
+    subdir = os.path.join(DATASET_DIR, cam_id)
+    os.makedirs(subdir, exist_ok=True)
+    ts    = datetime.utcnow().strftime("%Y%m%dT%H%M%S%f")
+    fname = f"{ts}.png"
+    fpath = os.path.join(subdir, fname)
+    img.save(fpath, format="PNG")
 
-    # 2) Inference
+    # write label line
+    with open(LABELS_CSV, "a") as f:
+        f.write(f"{cam_id},{fname},{cmd}\n")
+
+    # perform inference
     action, confidence = infer_action(img, cmd)
     return jsonify({"action": action, "confidence": float(confidence)})
 
