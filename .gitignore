@@ -1,0 +1,15 @@
+# Unreal build outputs & caches
+Binaries/
+DerivedDataCache/
+Intermediate/
+Saved/
+
+# IDE & editor files (optional)
+.vs/
+.idea/
+*.sln
+*.opensdf
+*.sdf
+.DS_Store
+
+PythonProj/venv/
